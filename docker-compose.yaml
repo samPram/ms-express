@@ -1,0 +1,136 @@
+services:
+  # Note: If you are assigning a custom name to your db service on the line below, make sure it does not contain underscores
+  db:
+    image: "postgres:latest"
+    environment:
+      POSTGRES_USER: ${PG_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-secret}
+      POSTGRES_DB: supertokens
+    ports:
+      - 5432:5432
+    networks:
+      - app_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "supertokens"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  supertokens:
+    image: registry.supertokens.io/supertokens/supertokens-postgresql:9.3.0
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - 3567:3567
+    environment:
+      POSTGRESQL_CONNECTION_URI: "postgresql://postgres:secret@db:5432/supertokens"
+    networks:
+      - app_network
+    restart: unless-stopped
+    healthcheck:
+      test: >
+        bash -c 'exec 3<>/dev/tcp/127.0.0.1/3567 && echo -e "GET /hello HTTP/1.1\r\nhost: 127.0.0.1:3567\r\nConnection: close\r\n\r\n" >&3 && cat <&3 | grep "Hello"'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongodb:
+    image: "mongo:latest"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo
+      MONGO_INITDB_ROOT_PASSWORD: secret
+    ports:
+      - "27017:27017"
+    networks:
+      - app_network
+    volumes:
+      - mongo-data:/data/db # Persistent volume for MongoDB data
+
+  zookeeper:
+    image: wurstmeister/zookeeper:latest
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    ports:
+      - "2181:2181"
+    networks:
+      - app_network
+
+  kafka:
+    image: wurstmeister/kafka:latest
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT
+      KAFKA_LISTENERS: INSIDE://kafka:9092
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka:9092 # gunakan nama 'kafka' untuk internal
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
+    ports:
+      - "9092:9092"
+    networks:
+      - app_network
+    depends_on:
+      - zookeeper
+
+  nginx:
+    build: ./nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - auth-service
+      - user-service
+    networks:
+      - app_network
+
+  auth-service:
+    build:
+      context: ./be-apps-auth
+    ports:
+      - "4001:4001"
+    environment:
+      - PORT=4001
+      - PG_HOST=db
+      - PG_PORT=5432
+      - PG_USER=postgres
+      - PG_PASS=secret
+      - PG_DB=supertokens
+      - S_CONN_URI=http://supertokens:3567
+      - S_APIKEY=secret
+      - S_APPNAME=ms-aldin-betest
+      - S_APIDOMAIN=http://localhost:4001
+      - S_APIBASEPATH=/api/v1/auth
+      - S_WEBSITEDOMAIN=http://localhost:3000
+      - K_CLIENTID=kafka-service
+      - K_HOST=kafka:9092
+      - K_TOPIC=kafka_aldin_betest
+    networks:
+      - app_network
+    depends_on:
+      - db
+      - supertokens
+      - kafka
+
+  user-service:
+    build:
+      context: ./be-apps-user
+    ports:
+      - "4003:4003"
+    environment:
+      - PORT=4003
+      - MONGODB_URI=mongodb://mongo:secret@mongodb:27017/db_aldin_betest?authMechanism=DEFAULT&authSource=admin
+      - K_CLIENTID=kafka-service
+      - K_HOST=kafka:9092
+      - K_TOPIC=kafka_aldin_betest
+    networks:
+      - app_network
+    depends_on:
+      - kafka
+      - mongodb
+
+networks:
+  app_network:
+    driver: bridge
+
+volumes:
+  mongo-data:
+    driver: local
